@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay, forkIO)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay, forkOS)
 import Control.Exception.Base (assert)
 import Control.Exception (catch, SomeException(..))
 import System.Posix.IO (createPipe, fdWrite, fdRead, FdOption(..), setFdOption)
@@ -28,7 +28,7 @@ exampleLongJob n = do putStrLn $ ".... Running job: " ++ n
 
 runJobs :: Fd -> Fd -> [IO ()] -> IO ()
 runJobs _ _ [] = return ()
-runJobs r w [j] = j
+runJobs _ _ [j] = j
 runJobs r w (j:jobs) = maybe (j >> runJobs r w jobs) forkJob =<< getToken r
   where 
     forkJob token = do
@@ -38,7 +38,7 @@ runJobs r w (j:jobs) = maybe (j >> runJobs r w jobs) forkJob =<< getToken r
       m <- newEmptyMVar
       --putStrLn $ "fork process " ++ unToken token
       -- consider using fork finally
-      threadId <- forkIO $ runForkedJob m j
+      threadId <- forkOS $ runForkedJob m j
       putMVar m token
 
       -- Run the rest of the jobs:
