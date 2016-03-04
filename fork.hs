@@ -1,38 +1,63 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay, forkIO)
 import Control.Exception.Base (assert)
+import Control.Exception (catch, SomeException(..))
 import System.Posix.IO (createPipe, fdWrite, fdRead, FdOption(..), setFdOption)
 import System.Posix.Types (Fd, ByteCount)
+
+newtype Token = Token { unToken :: String } deriving (Eq, Show)
 
 -- Main function:
 main :: IO ()
 main = do (readEnd, writeEnd) <- initServer 5
           putStrLn $ "created pipe with fd: (" ++ show readEnd ++ ", " ++ show writeEnd ++ ")"
-          doWork readEnd writeEnd
-  where doWork r w = do
-          (token, byteCount) <- fdRead r 1
-          assert_ $ countToInt byteCount == 1
-          putStrLn $ "read " ++ token ++ " from pipe. "
+          runJobs readEnd writeEnd
+
+runJobs :: Fd -> Fd -> IO ()
+runJobs r w = maybe (exampleJob 3) forkJob =<< getToken r
+  where forkJob token = do
+          putStrLn $ "read " ++ unToken token ++ " from pipe. "
           m <- newEmptyMVar
           -- consider using fork finally
-          threadId <- forkIO $ someWork m
-          putStrLn $ "fork process " ++ token
+          threadId <- forkIO $ runJob m (exampleJob 2)
+          putStrLn $ "fork process " ++ unToken token
           putMVar m token
-          putStrLn $ "waiting on process " ++ token
+          --exampleJob 1
+          putStrLn $ "waiting on " ++ unToken token
           returnedToken <- takeMVar m
-          putStrLn $ "reaped " ++ returnedToken
-          doWork r w
+          putStrLn $ "reaped " ++ unToken returnedToken
+          returnToken w returnedToken
+          runJobs r w
+
+runJob :: MVar (Token) -> IO () -> IO ()
+runJob m job = do token <- takeMVar m
+                  putStrLn $ "-- starting job with token: " ++ unToken token
+                  job
+                  putStrLn $ "-- finished job with token: " ++ unToken token
+                  putMVar m token
+                  return ()
+
+exampleJob :: Int -> IO ()
+exampleJob n = do putStrLn $ ".... Running job: " ++ show n
+                  threadDelay 1000000
+                  putStrLn $ ".... Finishing job: " ++ show n
+                
+
+-- Get a token if one is available, otherwise return Nothing:
+getToken :: Fd -> IO (Maybe Token)
+getToken fd = catch (readPipe) (\(_ :: SomeException) -> return Nothing) 
+  where readPipe = do (token, byteCount) <- fdRead fd 1
+                      assert_ $ countToInt byteCount == 1
+                      return $ Just $ Token $ token
+
+-- Return a token to the pipe:
+returnToken :: Fd -> Token -> IO ()
+returnToken fd token = do byteCount <- fdWrite fd (unToken token)
+                          assert_ $ countToInt byteCount == 1
 
 assert_ :: Monad m => Bool -> m ()
 assert_ c = assert c (return ())
 
-someWork :: MVar (String) -> IO ()
-someWork m = do token <- takeMVar m
-                putStrLn $ "... working on token: " ++ token
-                threadDelay 1000000
-                putStrLn $ "... finished token: " ++ token
-                putMVar m token
-                return ()
 
 initServer :: Int -> IO (Fd, Fd)
 initServer n = do -- Create the pipe: 
