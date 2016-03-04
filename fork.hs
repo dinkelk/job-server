@@ -9,39 +9,58 @@ newtype Token = Token { unToken :: String } deriving (Eq, Show)
 
 -- Main function:
 main :: IO ()
-main = do (readEnd, writeEnd) <- initServer 5
+main = do (readEnd, writeEnd) <- initServer 4
           putStrLn $ "created pipe with fd: (" ++ show readEnd ++ ", " ++ show writeEnd ++ ")"
-          runJobs readEnd writeEnd
+          runJobs readEnd writeEnd [exampleLongJob "A", exampleJob "B", exampleLongJob "C", 
+                                    exampleJob "D", exampleJob "E", exampleJob "F",
+                                    exampleJob "G", exampleJob "H", exampleJob "I",
+                                    exampleJob "J", exampleJob "K", exampleJob "L"]
 
-runJobs :: Fd -> Fd -> IO ()
-runJobs r w = maybe (exampleJob 3) forkJob =<< getToken r
-  where forkJob token = do
-          putStrLn $ "read " ++ unToken token ++ " from pipe. "
-          m <- newEmptyMVar
-          -- consider using fork finally
-          threadId <- forkIO $ runJob m (exampleJob 2)
-          putStrLn $ "fork process " ++ unToken token
-          putMVar m token
-          --exampleJob 1
-          putStrLn $ "waiting on " ++ unToken token
-          returnedToken <- takeMVar m
-          putStrLn $ "reaped " ++ unToken returnedToken
-          returnToken w returnedToken
-          runJobs r w
-
-runJob :: MVar (Token) -> IO () -> IO ()
-runJob m job = do token <- takeMVar m
-                  putStrLn $ "-- starting job with token: " ++ unToken token
-                  job
-                  putStrLn $ "-- finished job with token: " ++ unToken token
-                  putMVar m token
-                  return ()
-
-exampleJob :: Int -> IO ()
-exampleJob n = do putStrLn $ ".... Running job: " ++ show n
+exampleJob :: String -> IO ()
+exampleJob n = do putStrLn $ ".... Running job: " ++ n
                   threadDelay 1000000
-                  putStrLn $ ".... Finishing job: " ++ show n
-                
+                  putStrLn $ ".... Finishing job: " ++ n
+
+exampleLongJob :: String -> IO ()
+exampleLongJob n = do putStrLn $ ".... Running job: " ++ n
+                      threadDelay 10000000
+                      putStrLn $ ".... Finishing job: " ++ n
+
+runJobs :: Fd -> Fd -> [IO ()] -> IO ()
+runJobs _ _ [] = return ()
+runJobs r w [j] = j
+runJobs r w (j:jobs) = maybe (j >> runJobs r w jobs) forkJob =<< getToken r
+  where 
+    forkJob token = do
+      putStrLn $ "read " ++ unToken token ++ " from pipe. "
+
+      -- Fork new thread to run job:
+      m <- newEmptyMVar
+      --putStrLn $ "fork process " ++ unToken token
+      -- consider using fork finally
+      threadId <- forkIO $ runForkedJob m j
+      putMVar m token
+
+      -- Run the rest of the jobs:
+      runJobs r w jobs
+
+      -- Wait on my forked job:
+      --putStrLn $ "waiting on " ++ unToken token
+      returnedToken <- takeMVar m
+      return ()
+      --putStrLn $ "reaped " ++ unToken returnedToken
+    runForkedJob :: MVar (Token) -> IO () -> IO ()
+    runForkedJob m job = do token <- takeMVar m
+                            --putStrLn $ "-- starting job with token: " ++ unToken token
+                            job
+                            --putStrLn $ "-- finished job with token: " ++ unToken token
+    
+                            -- Return the token:
+                            returnToken w token
+                             
+                            -- Signal that I have finished:
+                            putMVar m token
+                            return ()
 
 -- Get a token if one is available, otherwise return Nothing:
 getToken :: Fd -> IO (Maybe Token)
