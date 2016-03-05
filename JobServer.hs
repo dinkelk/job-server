@@ -1,9 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 --module JobServer (initializeJobServer, getJobServer, clearJobServer, runJobs, runJob, waitOnJobs,
---                  printJobServerHandle, JobServerHandle) where
+--                  printJobServerHandle, JobServerHandle, tryWaitOnJobs) where
 
-import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay, forkOS)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, tryTakeMVar, MVar, threadDelay, forkOS)
 import Control.Exception.Base (assert)
 import Control.Exception (catch, SomeException(..))
 import Foreign.C.Types (CInt)
@@ -12,8 +12,10 @@ import System.Posix.IO (createPipe, fdWrite, fdRead, FdOption(..), setFdOption, 
 import System.Posix.Types (Fd(..), ByteCount)
 import System.IO (hPutStrLn, stderr)
 
-newtype JobServerHandle a = JobServerHandle { unJobServerHandle :: (Fd, Fd, [MVar a]) }
+newtype JobServerHandle a = JobServerHandle { unJobServerHandle :: (Fd, Fd, [MVar a]) } deriving (Show)
 newtype Token = Token { unToken :: String } deriving (Eq, Show)
+
+instance Show (MVar a)
 
 initializeJobServer :: Int -> IO (JobServerHandle a)
 initializeJobServer n = do 
@@ -57,11 +59,11 @@ runJobs :: JobServerHandle a -> [IO a] -> IO [a]
 runJobs _ [] = return []
 runJobs _ [j] = do ret <- j 
                    return [ret]
-runJobs handle (j:jobs) = maybe (j >> runJobs handle jobs) forkJob =<< getToken r
+runJobs handle (j:jobs) = maybe runJob forkJob =<< getToken r
   where 
     (r, w, _) = unJobServerHandle handle
     forkJob token = do
-      putStrLn $ "read " ++ unToken token ++ " from pipe. "
+      --putStrLn $ "read " ++ unToken token ++ " from pipe. "
 
       -- Fork new thread to run job:
       mToken <- newEmptyMVar
@@ -80,13 +82,16 @@ runJobs handle (j:jobs) = maybe (j >> runJobs handle jobs) forkJob =<< getToken 
       ret1 <- takeMVar mReturn
       return $ ret1:rets 
       --putStrLn $ "reaped " ++ unToken returnedToken
+    runJob = do ret1 <- j
+                rets <- runJobs handle jobs
+                return $ ret1:rets 
 
 runJob :: JobServerHandle a -> IO a -> IO (JobServerHandle a)
-runJob handle j = maybe (j >> return handle) forkJob =<< getToken r
+runJob handle j = maybe runJob forkJob =<< getToken r
   where 
     (r, w, mReturns) = unJobServerHandle handle
     forkJob token = do
-      putStrLn $ "read " ++ unToken token ++ " from pipe. "
+      --putStrLn $ "read " ++ unToken token ++ " from pipe. "
 
       -- Fork new thread to run job:
       mToken <- newEmptyMVar
@@ -96,10 +101,15 @@ runJob handle j = maybe (j >> return handle) forkJob =<< getToken r
       _ <- forkOS $ runForkedJob mToken mReturn w j
       putMVar mToken token
       return $ JobServerHandle (r, w, mReturns++[mReturn])
-
+    runJob = do ret <- j
+                mReturn <- newEmptyMVar
+                putMVar mReturn ret
+                return $ JobServerHandle (r, w, mReturns++[mReturn])
+      
 printJobServerHandle :: JobServerHandle a -> IO ()
 printJobServerHandle handle = putStrLn $ "handle: (" ++ show r ++ ", " ++ show w ++ ", len " ++ show (length mvars) ++ ")"
   where (r, w, mvars) = unJobServerHandle handle
+
 
 runForkedJob :: MVar (Token) -> MVar (a) -> Fd -> IO a -> IO ()
 runForkedJob mToken mReturn w job = do 
@@ -115,11 +125,16 @@ runForkedJob mToken mReturn w job = do
   putMVar mReturn ret
   return ()
 
--- todo return status here
+-- Wait on job and return a list of the job's return once all job's have finished:
 waitOnJobs :: JobServerHandle a -> IO [a]
 waitOnJobs handle = mapM takeMVar mReturns
-  where
-    (_, _, mReturns) = unJobServerHandle handle
+  where (_, _, mReturns) = unJobServerHandle handle
+
+-- Collect the return values of any jobs who have finished. Returns Nothing for
+-- outstanding jobs:
+tryWaitOnJobs :: JobServerHandle a -> IO [Maybe a]
+tryWaitOnJobs handle = mapM tryTakeMVar mReturns
+  where (_, _, mReturns) = unJobServerHandle handle
 
 -- Get a token if one is available, otherwise return Nothing:
 getToken :: Fd -> IO (Maybe Token)
@@ -149,7 +164,7 @@ splitBy delimiter = foldr f [[]]
 
 -- Main function:
 main :: IO ()
-main = do handle <- initializeJobServer 4
+main = do handle <- initializeJobServer 1
           printJobServerHandle handle
           returns <- runJobs handle jobs
           putStrLn $ "returns: " ++ show returns
