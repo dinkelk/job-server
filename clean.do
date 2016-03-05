@@ -1,1 +1,1 @@
-rm -f *.hi *.o fork
+rm -f *.hi *.o JobServer
