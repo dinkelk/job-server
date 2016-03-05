@@ -1,36 +1,55 @@
 {-# LANGUAGE ScopedTypeVariables #-}
+
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay, forkOS)
 import Control.Exception.Base (assert)
 import Control.Exception (catch, SomeException(..))
+import Foreign.C.Types (CInt)
+import System.Environment (getEnv, setEnv)
 import System.Posix.IO (createPipe, fdWrite, fdRead, FdOption(..), setFdOption)
-import System.Posix.Types (Fd, ByteCount)
+import System.Posix.Types (Fd(..), ByteCount)
 
+newtype JobServerHandle = JobServerHandle { unJobServerHandle :: (Fd, Fd) } deriving (Eq, Show)
 newtype Token = Token { unToken :: String } deriving (Eq, Show)
 
--- Main function:
-main :: IO ()
-main = do (readEnd, writeEnd) <- initServer 4
-          putStrLn $ "created pipe with fd: (" ++ show readEnd ++ ", " ++ show writeEnd ++ ")"
-          runJobs readEnd writeEnd [exampleLongJob "A", exampleJob "B", exampleLongJob "C", 
-                                    exampleJob "D", exampleJob "E", exampleJob "F",
-                                    exampleJob "G", exampleJob "H", exampleJob "I",
-                                    exampleJob "J", exampleJob "K", exampleJob "L"]
+initializeJobServer :: Int -> IO JobServerHandle
+initializeJobServer n = do 
+  -- Create the pipe: 
+  (readEnd, writeEnd) <- createPipe
+  assert_ $ readEnd >= 0
+  assert_ $ writeEnd >= 0
+  assert_ $ readEnd /= writeEnd
 
-exampleJob :: String -> IO ()
-exampleJob n = do putStrLn $ ".... Running job: " ++ n
-                  threadDelay 1000000
-                  putStrLn $ ".... Finishing job: " ++ n
+  -- Make the read end of the pipe non-blocking:
+  setFdOption readEnd NonBlockingRead True
 
-exampleLongJob :: String -> IO ()
-exampleLongJob n = do putStrLn $ ".... Running job: " ++ n
-                      threadDelay 10000000
-                      putStrLn $ ".... Finishing job: " ++ n
+  -- Write the tokens to the pipe:
+  byteCount <- fdWrite writeEnd tokens
+  assert_ $ countToInt byteCount == tokensToWrite
 
-runJobs :: Fd -> Fd -> [IO ()] -> IO ()
-runJobs _ _ [] = return ()
-runJobs _ _ [j] = j
-runJobs r w (j:jobs) = maybe (j >> runJobs r w jobs) forkJob =<< getToken r
+  -- Set an environment variable to store the handle for 
+  -- other programs that might use this server:
+  setEnv "MAKEFLAGS" $ show readEnd ++ ", " ++ show writeEnd
+  
+  -- Return the read and write ends of the pipe:
+  return $ JobServerHandle (readEnd, writeEnd)
+  where tokens = concat $ map show $ take tokensToWrite [(1::Integer)..]
+        tokensToWrite = n-1
+
+getJobServer :: IO JobServerHandle
+getJobServer = do flags <- getEnv "MAKEFLAGS"
+                  let handle = handle' flags
+                  return $ JobServerHandle $ (Fd $ handle !! 0, Fd $ handle !! 1)
+  where handle' flags = map convert (splitBy ',' flags)
+        convert a = read a :: CInt
+
+-- Given a list of IO () jobs, run them when a space on the job server is
+-- available.
+runJobs :: JobServerHandle -> [IO ()] -> IO ()
+runJobs _ [] = return ()
+runJobs _ [j] = j
+runJobs handle (j:jobs) = maybe (j >> runJobs handle jobs) forkJob =<< getToken r
   where 
+    (r, w) = unJobServerHandle handle
     forkJob token = do
       putStrLn $ "read " ++ unToken token ++ " from pipe. "
 
@@ -42,7 +61,7 @@ runJobs r w (j:jobs) = maybe (j >> runJobs r w jobs) forkJob =<< getToken r
       putMVar m token
 
       -- Run the rest of the jobs:
-      runJobs r w jobs
+      runJobs handle jobs
 
       -- Wait on my forked job:
       --putStrLn $ "waiting on " ++ unToken token
@@ -74,29 +93,36 @@ returnToken :: Fd -> Token -> IO ()
 returnToken fd token = do byteCount <- fdWrite fd (unToken token)
                           assert_ $ countToInt byteCount == 1
 
+-- Convenient assert function:
 assert_ :: Monad m => Bool -> m ()
 assert_ c = assert c (return ())
 
-
-initServer :: Int -> IO (Fd, Fd)
-initServer n = do -- Create the pipe: 
-                  (readEnd, writeEnd) <- createPipe
-                  assert_ $ readEnd >= 0
-                  assert_ $ writeEnd >= 0
-                  assert_ $ readEnd /= writeEnd
-
-                  -- Make the read end of the pipe non-blocking:
-                  setFdOption readEnd NonBlockingRead True
-
-                  -- Write the tokens to the pipe:
-                  byteCount <- fdWrite writeEnd tokens
-                  assert_ $ countToInt byteCount == tokensToWrite
-                  
-                  -- Return the read and write ends of the pipe:
-                  return (readEnd, writeEnd)
-  where tokens = concat $ map show $ take tokensToWrite [(1::Integer)..]
-        tokensToWrite = n-1
-
-
+-- Conversion helper for ByteCount type:
 countToInt :: ByteCount -> Int
 countToInt a = fromIntegral a
+
+splitBy :: Char -> String -> [String]
+splitBy delimiter = foldr f [[]] 
+  where f c l@(x:xs) | c == delimiter = []:l
+                     | otherwise = (c:x):xs
+        f _ [] = []
+
+-- Main function:
+main :: IO ()
+main = do handle <- initializeJobServer 4
+          runJobs handle [exampleLongJob "A", exampleJob "B", exampleLongJob "C", 
+                          exampleJob "D", exampleJob "E", exampleJob "F",
+                          exampleJob "G", exampleJob "H", exampleJob "I",
+                          exampleJob "J", exampleJob "K", exampleJob "L"]
+
+exampleJob :: String -> IO ()
+exampleJob n = do putStrLn $ ".... Running job: " ++ n
+                  threadDelay 1000000
+                  putStrLn $ ".... Finishing job: " ++ n
+
+exampleLongJob :: String -> IO ()
+exampleLongJob n = do putStrLn $ ".... Running job: " ++ n
+                      threadDelay 10000000
+                      putStrLn $ ".... Finishing job: " ++ n
+
+
