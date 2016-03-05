@@ -1,5 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
+module JobServer (initializeJobServer, getJobServer, clearJobServer, runJobs, runJob, waitOnJobs,
+                  printJobServerHandle, JobServerHandle) where
+
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, MVar, threadDelay, forkOS)
 import Control.Exception.Base (assert)
 import Control.Exception (catch, SomeException(..))
@@ -7,6 +10,7 @@ import Foreign.C.Types (CInt)
 import System.Environment (getEnv, setEnv)
 import System.Posix.IO (createPipe, fdWrite, fdRead, FdOption(..), setFdOption, closeFd)
 import System.Posix.Types (Fd(..), ByteCount)
+import System.IO (hPutStrLn, stderr)
 
 newtype JobServerHandle = JobServerHandle { unJobServerHandle :: (Fd, Fd, [MVar Token]) }
 newtype Token = Token { unToken :: String } deriving (Eq, Show)
@@ -56,11 +60,11 @@ runJobs handle (j:jobs) = maybe (j >> runJobs handle jobs) forkJob =<< getToken 
   where 
     (r, w, _) = unJobServerHandle handle
     forkJob token = do
-      putStrLn $ "read " ++ unToken token ++ " from pipe. "
+      hPutStrLn stderr $ "read " ++ unToken token ++ " from pipe. "
 
       -- Fork new thread to run job:
       m <- newEmptyMVar
-      --putStrLn $ "fork process " ++ unToken token
+      --hPutStrLn stderr $ "fork process " ++ unToken token
       -- consider using fork finally
       -- consider putting thread id in handle so that it can be killed on error
       _ <- forkOS $ runForkedJob m w j
@@ -70,36 +74,36 @@ runJobs handle (j:jobs) = maybe (j >> runJobs handle jobs) forkJob =<< getToken 
       runJobs handle jobs
 
       -- Wait on my forked job:
-      --putStrLn $ "waiting on " ++ unToken token
+      --hPutStrLn stderr $ "waiting on " ++ unToken token
       _ <- takeMVar m
       return ()
-      --putStrLn $ "reaped " ++ unToken returnedToken
+      --hPutStrLn stderr $ "reaped " ++ unToken returnedToken
 
 runJob :: JobServerHandle -> IO () -> IO JobServerHandle
 runJob handle j = maybe (j >> return handle) forkJob =<< getToken r
   where 
     (r, w, mvars) = unJobServerHandle handle
     forkJob token = do
-      putStrLn $ "read " ++ unToken token ++ " from pipe. "
+      hPutStrLn stderr $ "read " ++ unToken token ++ " from pipe. "
 
       -- Fork new thread to run job:
       m <- newEmptyMVar
-      --putStrLn $ "fork process " ++ unToken token
+      --hPutStrLn stderr $ "fork process " ++ unToken token
       -- consider using fork finally
       _ <- forkOS $ runForkedJob m w j
       putMVar m token
       return $ JobServerHandle (r, w, mvars++[m])
 
 printJobServerHandle :: JobServerHandle -> IO ()
-printJobServerHandle handle = putStrLn $ "handle: (" ++ show r ++ ", " ++ show w ++ ", len " ++ show (length mvars) ++ ")"
+printJobServerHandle handle = hPutStrLn stderr $ "handle: (" ++ show r ++ ", " ++ show w ++ ", len " ++ show (length mvars) ++ ")"
   where (r, w, mvars) = unJobServerHandle handle
 
 runForkedJob :: MVar (Token) -> Fd -> IO () -> IO ()
 runForkedJob m w job = do 
   token <- takeMVar m
-  --putStrLn $ "-- starting job with token: " ++ unToken token
+  --hPutStrLn stderr $ "-- starting job with token: " ++ unToken token
   job
-  --putStrLn $ "-- finished job with token: " ++ unToken token
+  --hPutStrLn stderr $ "-- finished job with token: " ++ unToken token
 
   -- Return the token:
   returnToken w token
@@ -145,7 +149,7 @@ main :: IO ()
 main = do handle <- initializeJobServer 4
           printJobServerHandle handle
           runJobs handle jobs
-          putStrLn "--------------------------------------------------------------------"
+          hPutStrLn stderr "--------------------------------------------------------------------"
           handle2 <- getJobServer
           printJobServerHandle handle2
           handles <- mapM (runJob handle2) jobs
@@ -158,13 +162,13 @@ main = do handle <- initializeJobServer 4
                 exampleJob "J", exampleJob "K", exampleJob "L"]
 
 exampleJob :: String -> IO ()
-exampleJob n = do putStrLn $ ".... Running job: " ++ n
+exampleJob n = do hPutStrLn stderr $ ".... Running job: " ++ n
                   threadDelay 1000000
-                  putStrLn $ ".... Finishing job: " ++ n
+                  hPutStrLn stderr $ ".... Finishing job: " ++ n
 
 exampleLongJob :: String -> IO ()
-exampleLongJob n = do putStrLn $ ".... Running job: " ++ n
+exampleLongJob n = do hPutStrLn stderr $ ".... Running job: " ++ n
                       threadDelay 10000000
-                      putStrLn $ ".... Finishing job: " ++ n
+                      hPutStrLn stderr $ ".... Finishing job: " ++ n
 
 
